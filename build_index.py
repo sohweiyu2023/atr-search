@@ -11,6 +11,7 @@ Output (published to GitHub Pages):
   public/pagefind-zh/   posts with Chinese text, split into Chinese words
   public/pagefind-ja/   posts with Japanese text
   public/status.json    when it ran, how many posts, any problems
+Blogger Pages (/p/... addresses: old backups) are never indexed.
 Python 3.9+ standard library only; Pagefind runs through npx (Node 18+).
 """
 import argparse, html, json, os, re, shutil, subprocess, sys, time, urllib.request
@@ -18,7 +19,10 @@ from html.parser import HTMLParser
 
 BLOG = 'https://www.awakeningtoreality.com'
 PAGEFIND = 'pagefind@1.5.2'
-FEEDS = ('/feeds/posts/full', '/feeds/pages/full')
+# Posts only. The blog's Pages section (/p/...) holds backups of old, outdated
+# posts and must never appear in search.
+FEEDS = ('/feeds/posts/full',)
+STATIC_PAGE = re.compile(r'^https?://[^/]+/p/')
 PAGE_SIZE = 100
 
 def log(*parts):
@@ -123,10 +127,15 @@ def main():
     ap.add_argument('--feed-file', help='use a saved feed JSON (tests) instead of the live blog')
     ap.add_argument('--blog', default=BLOG, help='blog address (tests use a local copy)')
     ap.add_argument('--min-posts', type=int, default=50, help='refuse to publish an index with fewer posts')
+    ap.add_argument('--keep-static-pages', action='store_true', help=argparse.SUPPRESS)  # tests of the theme's own /p/ filter only
     args = ap.parse_args()
     started = time.time()
     entries = json.load(open(args.feed_file, encoding='utf-8'))['feed']['entry'] if args.feed_file else all_entries(args.blog.rstrip('/'))
     records = [r for r in (entry_record(e) for e in entries) if r['link'] and r['blocks']]
+    pages = [r for r in records if STATIC_PAGE.match(r['link'])]
+    if pages and not args.keep_static_pages:
+        records = [r for r in records if not STATIC_PAGE.match(r['link'])]
+        log('left out', len(pages), 'Blogger Pages (/p/ addresses)')
     if len(records) < (1 if args.feed_file else args.min_posts):
         sys.exit('[atr-search] only %d posts found; refusing to publish a near-empty index' % len(records))
     shutil.rmtree(args.work, ignore_errors=True); shutil.rmtree(args.out, ignore_errors=True)
@@ -144,7 +153,7 @@ def main():
         for name in os.listdir(out):          # the theme draws its own results: drop Pagefind's UI files
             if re.search(r'-ui\.(js|css)$', name):
                 os.remove(os.path.join(out, name))
-    status = {'built': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'posts': len(records),
+    status = {'built': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'posts': len(records), 'pages_left_out': 0 if args.keep_static_pages else len(pages),
               'chinese': len(groups['zh']), 'japanese': len(groups['ja']), 'seconds': round(time.time() - started, 1),
               'indexes': ['pagefind/'] + ['pagefind-%s/' % k for k in ('zh', 'ja') if groups[k]]}
     with open(os.path.join(args.out, 'status.json'), 'w', encoding='utf-8') as f:
