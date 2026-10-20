@@ -1,0 +1,59 @@
+# Rebuilds the Awakening to Reality search index from the blog feed and
+# publishes it on GitHub Pages. Runs every 3 hours by itself; nothing to do.
+name: Build AtR search index
+
+on:
+  schedule:
+    - cron: '23 */3 * * *'      # every 3 hours (UTC), at :23 past
+  workflow_dispatch: {}          # "Run workflow" button for an immediate rebuild
+
+permissions:
+  contents: write                # the keepalive commit (below)
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Build the index from the blog feed
+        run: python build_index.py --out public
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      # GitHub pauses scheduled jobs in repositories with no commits for 60
+      # days. A tiny commit every ~45 days keeps the schedule running.
+      - name: Keep the schedule alive
+        run: |
+          last=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - last )) -gt $(( 45 * 86400 )) ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            date -u > last-keepalive.txt
+            git add last-keepalive.txt
+            git commit -m "Keep the search schedule active"
+            git push
+          fi
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
