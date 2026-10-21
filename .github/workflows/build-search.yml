@@ -1,5 +1,6 @@
 # Rebuilds the Awakening to Reality search index from the blog feed and
 # publishes it on GitHub Pages. Runs every 3 hours by itself; nothing to do.
+# v18.31: actions moved to their Node 24 versions (GitHub retires Node 20).
 name: Build AtR search index
 
 on:
@@ -21,17 +22,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
       - name: Build the index from the blog feed
         run: python build_index.py --out public
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: public
       # GitHub pauses scheduled jobs in repositories with no commits for 60
@@ -56,4 +57,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
