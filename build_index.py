@@ -12,13 +12,14 @@ Output (published to GitHub Pages):
   public/pagefind-ja/   posts with Japanese text
   public/status.json    when it ran, how many posts, any problems
 Blogger Pages (/p/... addresses: old backups) are never indexed.
-Python 3.9+ standard library only; Pagefind runs through npx (Node 18+).
+Python standard library only; run npm ci before building to install locked Pagefind.
 """
 import argparse, html, json, os, re, shutil, subprocess, sys, time, urllib.request
+from pathlib import Path
 from html.parser import HTMLParser
 
 BLOG = 'https://www.awakeningtoreality.com'
-PAGEFIND = 'pagefind@1.5.2'
+PAGEFIND = Path(__file__).resolve().parent / 'node_modules' / 'pagefind' / 'lib' / 'runner' / 'bin.cjs'
 # Posts only. The blog's Pages section (/p/...) holds backups of old, outdated
 # posts and must never appear in search.
 FEEDS = ('/feeds/posts/full',)
@@ -116,9 +117,11 @@ def page_html(rec):
         html.escape(rec['title']), attr(rec['link']), attr(rec['date']), tags, html.escape(rec['title']), body)
 
 def run_pagefind(site, out, language):
-    cmd = ['npx', '-y', PAGEFIND, '--site', site, '--output-path', out, '--force-language', language, '--quiet']
+    if not PAGEFIND.is_file():
+        raise RuntimeError('Pagefind is not installed. Run npm ci --ignore-scripts first.')
+    cmd = ['node', str(PAGEFIND), '--site', site, '--output-path', out, '--force-language', language, '--quiet']
     log('running', ' '.join(cmd))
-    subprocess.run(cmd, check=True, shell=(os.name == 'nt'))
+    subprocess.run(cmd, check=True)
 
 def main():
     ap = argparse.ArgumentParser()
