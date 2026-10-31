@@ -51,6 +51,7 @@ class DiagnosticTest(unittest.TestCase):
 
     def test_exhausted_fetch_is_error_and_no_response_body(self):
         error = urllib.error.HTTPError('https://example.invalid/' + MARKER, 503, MARKER, {}, None)
+        self.addCleanup(error.close)
         with patch.object(builder.urllib.request, 'urlopen', side_effect=error), \
                 patch.object(builder.time, 'sleep'), contextlib.redirect_stdout(self.console):
             with self.assertRaises(urllib.error.HTTPError):
