@@ -32,7 +32,7 @@ class OfflineIndexTest(unittest.TestCase):
             out = work / 'public'
             site = work / 'site'
             subprocess.run([sys.executable, str(ROOT / 'build_index.py'), '--feed-file', str(fixture),
-                            '--out', str(out), '--work', str(site)], check=True, cwd=ROOT)
+                            '--out', str(out), '--work', str(site), '--diagnostics', str(work / 'diagnostics.json')], check=True, cwd=ROOT)
             status = json.loads((out / 'status.json').read_text(encoding='utf-8'))
             self.assertEqual(status['posts'], 3)
             self.assertEqual(status['pages_left_out'], 1)
@@ -48,6 +48,10 @@ class OfflineIndexTest(unittest.TestCase):
             self.assertNotIn('excluded_script_marker', text)
             self.assertIn('&lt;title&gt;', text)
             self.assertTrue((out / '.nojekyll').is_file())
+            diagnostics = json.loads((work / 'diagnostics.json').read_text(encoding='utf-8'))
+            self.assertEqual(diagnostics['outcome'], 'succeeded')
+            self.assertEqual(len([e for e in diagnostics['events'] if e['event'] == 'index_validated']), 3)
+            self.assertFalse((out / 'diagnostics.json').exists())
 
 
 if __name__ == '__main__':
