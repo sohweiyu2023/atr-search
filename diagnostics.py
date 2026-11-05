@@ -9,7 +9,9 @@ import uuid
 
 class BuildFailure(RuntimeError):
     REASONS = {'insufficient_records', 'index_process_failed', 'index_manifest_mismatch',
-               'index_assets_missing', 'index_validation_failed'}
+               'index_assets_missing', 'index_validation_failed', 'unsafe_output_paths',
+               'output_publish_failed', 'output_rollback_failed', 'unowned_generated_paths',
+               'output_recovery_required', 'output_committed_after_error'}
 
     def __init__(self, reason):
         self.reason = reason if reason in self.REASONS else 'build_validation_failed'

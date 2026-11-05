@@ -15,9 +15,13 @@ Blogger Pages (/p/... addresses: old backups) are never indexed.
 Python standard library only; run npm ci before building to install locked Pagefind.
 """
 import argparse, html, json, os, re, shutil, subprocess, sys, time, urllib.request
+import urllib.error, tempfile
 from pathlib import Path
 from html.parser import HTMLParser
 from diagnostics import BuildFailure, Diagnostics, validate_index
+from safe_evidence import BODY_LIMIT, EvidenceStore, run_bounded
+from output_publish import staged_output, validate_paths, mark_owned, PublishInterrupted
+from status_page import render_status
 
 BLOG = 'https://www.awakeningtoreality.com'
 PAGEFIND = Path(__file__).resolve().parent / 'node_modules' / 'pagefind' / 'lib' / 'runner' / 'bin.cjs'
@@ -27,6 +31,14 @@ FEEDS = ('/feeds/posts/full',)
 STATIC_PAGE = re.compile(r'^https?://[^/]+/p/')
 PAGE_SIZE = 100
 DIAGNOSTICS = None
+EVIDENCE = None
+FEED_LIMIT = 32 * 1024 * 1024
+
+def failure(component, **detail):
+    if EVIDENCE is not None:
+        EVIDENCE.capture(component, **detail)
+        if EVIDENCE.write_failed:
+            event('failure_evidence_write_failed', level='warning')
 
 def event(name, level='info', **counts):
     if DIAGNOSTICS is not None:
@@ -35,14 +47,40 @@ def event(name, level='info', **counts):
 def fetch_json(url, tries=4):
     started = time.monotonic()
     for attempt in range(1, tries + 1):
+        raw, status, headers = None, None, None
+        truncated = False
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'atr-search-index/1.0 (+https://www.awakeningtoreality.com)'})
             with urllib.request.urlopen(req, timeout=60) as res:
-                result = json.loads(res.read().decode('utf-8'))
+                status = getattr(res, 'status', 200)
+                headers = getattr(res, 'headers', None)
+                raw = res.read(FEED_LIMIT + 1)
+                if len(raw) > FEED_LIMIT:
+                    truncated = True
+                    raise ValueError('feed_response_exceeds_32_MiB_limit')
+                result = json.loads(raw.decode('utf-8'))
             event('fetch_succeeded', attempt=attempt, seconds=round(time.monotonic() - started, 3))
             return result
         except Exception as error:  # network hiccup: retry with back-off
             code = getattr(error, 'code', 0)
+            provider_body = None
+            if isinstance(error, urllib.error.HTTPError):
+                status, headers = error.code, error.headers
+                try:
+                    provider_body = error.read(BODY_LIMIT + 1)
+                    truncated = len(provider_body) > BODY_LIMIT
+                    provider_body = provider_body[:BODY_LIMIT]
+                except Exception as body_error:
+                    failure('blogger_error_body_read', error=body_error, url=url, status=status)
+                    provider_body = None
+                finally:
+                    try:
+                        error.close()
+                    except Exception as close_error:
+                        failure('blogger_error_close', error=close_error, url=url, status=status)
+            failure('blogger_fetch_parse', error=error, url=url, status=status, headers=headers,
+                    raw=provider_body, truncated=truncated, payload=raw is not None,
+                    seconds=time.monotonic() - started, code=code)
             event('fetch_failed', level='error' if attempt == tries else 'warning',
                   attempt=attempt, max_attempts=tries, http_status=code if isinstance(code, int) else 0,
                   timeout=isinstance(error, TimeoutError) or isinstance(getattr(error, 'reason', None), TimeoutError),
@@ -132,24 +170,47 @@ def page_html(rec):
 def run_pagefind(site, out, language):
     if not PAGEFIND.is_file():
         event('index_dependency_missing', level='error')
+        print('[atr-search] Setup required: run npm ci --ignore-scripts to install the locked index dependency.', flush=True)
         raise RuntimeError('Pagefind is not installed. Run npm ci --ignore-scripts first.')
     cmd = ['node', str(PAGEFIND), '--site', site, '--output-path', out, '--force-language', language, '--quiet']
     started = time.monotonic()
     event('index_started', chinese=language == 'zh', japanese=language == 'ja')
     # Pagefind output can contain titles/paths. Keep diagnostics aggregate-only.
-    result = subprocess.run(cmd, capture_output=True)
+    try:
+        result = run_bounded(cmd)
+    except Exception as error:
+        failure('pagefind_launcher', error=error, seconds=time.monotonic() - started)
+        raise
     event('index_process_finished', level='info' if result.returncode == 0 else 'error',
           exit_code=result.returncode, seconds=round(time.monotonic() - started, 3),
-          stderr_bytes=len(result.stderr), stdout_bytes=len(result.stdout),
+          stderr_bytes=getattr(result, 'output_bytes', [len(result.stdout), len(result.stderr)])[1],
+          stdout_bytes=getattr(result, 'output_bytes', [len(result.stdout), len(result.stderr)])[0],
           permission_denied=b'PermissionDenied' in result.stderr,
           process_panicked=b'panicked' in result.stderr)
     if result.returncode:
+        unavailable = getattr(result, 'output_unavailable', [False, False])
+        failure('pagefind_stderr', raw=None if unavailable[1] else result.stderr, code=result.returncode,
+                truncated=getattr(result, 'output_truncated', [False, False])[1], seconds=time.monotonic() - started)
+        failure('pagefind_stdout', raw=None if unavailable[0] else result.stdout, code=result.returncode,
+                truncated=getattr(result, 'output_truncated', [False, False])[0], seconds=time.monotonic() - started)
         raise BuildFailure('index_process_failed')
     if result.stderr:
+        failure('pagefind_warning', raw=result.stderr, code=0,
+                truncated=getattr(result, 'output_truncated', [False, False])[1], seconds=time.monotonic() - started)
         event('index_stderr_present', level='warning', stderr_bytes=len(result.stderr),
               stemming_unavailable=b"doesn't support stemming" in result.stderr)
 
 def build(args):
+    with staged_output(args.out, args.work, args.diagnostics,
+                       warn=lambda: event('output_stage_cleanup_failed', level='warning')) as output:
+        staged = argparse.Namespace(**vars(args))
+        staged.out = str(output)
+        build_output(staged)
+        DIAGNOSTICS.stage = 'publish'
+    event('output_published')
+
+
+def build_output(args):
     started = time.monotonic()
     DIAGNOSTICS.stage = 'fetch'
     if args.feed_file:
@@ -180,13 +241,15 @@ def build(args):
         event('insufficient_records', level='error', actual=len(records), minimum=minimum)
         raise BuildFailure('insufficient_records')
     DIAGNOSTICS.stage = 'index'
-    shutil.rmtree(args.work, ignore_errors=True); shutil.rmtree(args.out, ignore_errors=True)
+    os.makedirs(args.work, exist_ok=True)
+    mark_owned(args.work, 'work')
+    session_work = tempfile.mkdtemp(prefix='.atr-search-work-', dir=args.work)
     groups = {'en': records, 'zh': [r for r in records if r['zh']], 'ja': [r for r in records if r['ja']]}
     event('language_counts', all_languages=len(records), chinese=len(groups['zh']), japanese=len(groups['ja']))
     for lang, recs in groups.items():
         if not recs:
             continue
-        site = os.path.join(args.work, lang)
+        site = os.path.join(session_work, lang)
         os.makedirs(site, exist_ok=True)
         for i, rec in enumerate(recs):
             with open(os.path.join(site, '%05d.html' % i), 'w', encoding='utf-8') as f:
@@ -206,14 +269,13 @@ def build(args):
     with open(os.path.join(args.out, 'status.json'), 'w', encoding='utf-8') as f:
         json.dump(status, f, indent=1)
     with open(os.path.join(args.out, 'index.html'), 'w', encoding='utf-8') as f:
-        f.write('<!doctype html><meta charset="utf-8"><title>AtR search index</title><p>Search index for '
-                '<a href="%s">Awakening to Reality</a>. Built %s from %d posts.</p>' % (BLOG, status['built'], len(records)))
+        f.write(render_status(status))
     open(os.path.join(args.out, '.nojekyll'), 'w').close()
     event('status_written', posts=len(records), indexes=len(status['indexes']))
 
 def main():
-    global DIAGNOSTICS
-    ap = argparse.ArgumentParser()
+    global DIAGNOSTICS, EVIDENCE
+    ap = argparse.ArgumentParser(description='Build the AtR index. Use --feed-file for an offline build; successful output replaces the previous generated index only after validation.')
     ap.add_argument('--out', default='public')
     ap.add_argument('--work', default='build-site')
     ap.add_argument('--feed-file', help='use a saved feed JSON (tests) instead of the live blog')
@@ -222,15 +284,35 @@ def main():
     ap.add_argument('--diagnostics', default='.diagnostics/build.json', help='aggregate diagnostic report outside published output')
     ap.add_argument('--keep-static-pages', action='store_true', help=argparse.SUPPRESS)  # tests of the theme's own /p/ filter only
     args = ap.parse_args()
+    try:
+        validate_paths(args.out, args.work, args.diagnostics)
+    except BuildFailure as error:
+        if error.reason == 'unowned_generated_paths':
+            print('[atr-search] Existing output/work folder is not marked as generated. Preserve it and choose new or empty paths.', flush=True)
+        elif error.reason == 'output_recovery_required':
+            print('[atr-search] Output is missing but a preserved generated backup exists. Inspect and restore that backup before retrying.', flush=True)
+        else:
+            print('[atr-search] Choose separate generated output, work and diagnostic paths; do not select source or evidence folders.', flush=True)
+        return 2
     DIAGNOSTICS = Diagnostics(args.diagnostics)
+    EVIDENCE = None
     DIAGNOSTICS.emit('build_started', offline=bool(args.feed_file))
     try:
+        EVIDENCE = EvidenceStore(Path(args.diagnostics).parent, DIAGNOSTICS.context['build_id'], public_root=args.out)
         build(args)
     except (Exception, KeyboardInterrupt) as error:
         # Never dump exception messages, URLs, commands, article text or tracebacks.
         cancelled = isinstance(error, KeyboardInterrupt)
+        if isinstance(error, PublishInterrupted) or (isinstance(error, BuildFailure) and error.reason == 'output_committed_after_error'):
+            event('output_commit_observed', level='warning')
+            print('[atr-search] Complete replacement output was observed before interruption/error. Inspect its status and preserved backup before retrying; do not assume the old output is active.', flush=True)
+        failure('build_' + DIAGNOSTICS.stage, error=error, payload=DIAGNOSTICS.stage in {'fetch', 'records'})
         if isinstance(error, BuildFailure):
             event(error.reason, level='error')
+            if error.reason == 'unsafe_output_paths':
+                print('[atr-search] Choose separate generated output, work and diagnostic paths; do not select source folders.', flush=True)
+            elif error.reason == 'output_rollback_failed':
+                print('[atr-search] Automatic output restoration failed. Inspect the versioned .atr-search-output-backup directory before retrying.', flush=True)
         event('build_interrupted' if cancelled else 'build_error', level='warning' if cancelled else 'error', interrupted=cancelled,
               validation_failure=isinstance(error, BuildFailure), io_failure=isinstance(error, OSError),
               invalid_data=isinstance(error, (ValueError, KeyError, TypeError)))

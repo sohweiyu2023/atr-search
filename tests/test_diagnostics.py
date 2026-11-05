@@ -12,6 +12,7 @@ import urllib.error
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import build_index as builder
+from output_publish import mark_owned
 from diagnostics import BuildFailure, Diagnostics, validate_index
 import workflow_summary
 from workflow_summary import render
@@ -28,6 +29,8 @@ class DiagnosticTest(unittest.TestCase):
         self.console = io.StringIO()
         self.previous = builder.DIAGNOSTICS
         self.addCleanup(setattr, builder, 'DIAGNOSTICS', self.previous)
+        self.addCleanup(setattr, builder, 'EVIDENCE', builder.EVIDENCE)
+        builder.EVIDENCE = None
         builder.DIAGNOSTICS = Diagnostics(self.report)
 
     def run_main(self, entries):
@@ -88,6 +91,7 @@ class DiagnosticTest(unittest.TestCase):
         out = self.root / 'public'
         out.mkdir()
         (out / 'status.json').write_text('previous', encoding='utf-8')
+        mark_owned(out, 'output')
         entries = [
             {'content': {'$t': MARKER}},
             {'link': [{'rel': 'alternate', 'href': 'https://example.invalid/' + MARKER}]},
@@ -104,7 +108,7 @@ class DiagnosticTest(unittest.TestCase):
 
     def test_subprocess_failure_records_exit_code_not_stderr(self):
         with patch.object(builder, 'PAGEFIND', self.report), patch.object(Path, 'is_file', return_value=True), \
-                patch.object(builder.subprocess, 'run', return_value=subprocess.CompletedProcess([], 7, MARKER.encode(), MARKER.encode())), \
+                patch.object(builder, 'run_bounded', return_value=subprocess.CompletedProcess([], 7, MARKER.encode(), MARKER.encode())), \
                 contextlib.redirect_stdout(self.console):
             with self.assertRaises(BuildFailure):
                 builder.run_pagefind('unused', 'unused', 'en')

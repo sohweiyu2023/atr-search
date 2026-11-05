@@ -4,3 +4,6 @@ build-site/
 __pycache__/
 *.pyc
 .diagnostics/
+.atr-search-stage-*/
+.atr-search-output-backup-*/
+.atr-search-work-*/
